@@ -1,0 +1,370 @@
+#!/bin/bash
+
+# Exit on any error
+set -e
+
+# Move to the test-network directory
+cd ~/fabric-samples/test-network
+
+# Helper functions
+function successln() {
+  echo -e "\033[32m${1}\033[0m"
+}
+
+function infoln() {
+  echo -e "\033[34m${1}\033[0m"
+}
+
+function errorln() {
+  echo -e "\033[31m${1}\033[0m"
+}
+
+# Step 1: Cleanup
+infoln "Cleaning up any existing network..."
+./network.sh down
+cd addOrg3
+./addOrg3.sh down
+cd ..
+rm -rf channel-artifacts/*
+mkdir -p channel-artifacts
+
+# Step 2: Start the network with CA
+infoln "Starting the network with Certificate Authorities..."
+./network.sh up createChannel -c mychannel -ca
+sleep 5
+
+# Step 3: Add Org3 to the network
+infoln "Adding Org3 to the network..."
+cd addOrg3
+./addOrg3.sh up -c mychannel
+cd ..
+sleep 5
+
+# Step 4: Create Blue Channel (for Org1 and Org2)
+infoln "Creating Blue Channel (bluechannel)..."
+
+# Generate the channel transaction
+export FABRIC_CFG_PATH=$PWD/configtx
+export CHANNEL_NAME=bluechannel
+
+# Create the channel transaction
+../bin/configtxgen -profile TwoOrgsChannel -outputCreateChannelTx ./channel-artifacts/bluechannel.tx -channelID bluechannel
+
+# Set environment variables for the peer commands
+export FABRIC_CFG_PATH=$PWD/../config
+export ORDERER_CA=${PWD}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+
+# Set Org1 as the channel creator
+export CORE_PEER_TLS_ENABLED=true
+export CORE_PEER_LOCALMSPID="Org1MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+export CORE_PEER_ADDRESS=localhost:7051
+
+# Create the channel
+infoln "Creating bluechannel..."
+peer channel create -o localhost:7050 -c bluechannel \
+  --ordererTLSHostnameOverride orderer.example.com \
+  -f ./channel-artifacts/bluechannel.tx --outputBlock ./channel-artifacts/bluechannel.block \
+  --tls --cafile "$ORDERER_CA"
+
+# Join Org1 peer to the channel
+infoln "Joining Org1 peer to bluechannel..."
+peer channel join -b ./channel-artifacts/bluechannel.block
+
+# Join Org2 peer to the channel
+export CORE_PEER_LOCALMSPID="Org2MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+export CORE_PEER_ADDRESS=localhost:9051
+
+infoln "Joining Org2 peer to bluechannel..."
+peer channel join -b ./channel-artifacts/bluechannel.block
+
+# Set anchor peers for bluechannel
+infoln "Updating anchor peers for bluechannel..."
+# Generate anchor peer update for Org1
+export FABRIC_CFG_PATH=${PWD}/configtx
+../bin/configtxgen -profile TwoOrgsChannel -outputAnchorPeersUpdate ./channel-artifacts/Org1MSPanchors_bluechannel.tx -channelID bluechannel -asOrg Org1MSP
+
+# Generate anchor peer update for Org2
+../bin/configtxgen -profile TwoOrgsChannel -outputAnchorPeersUpdate ./channel-artifacts/Org2MSPanchors_bluechannel.tx -channelID bluechannel -asOrg Org2MSP
+
+# Apply anchor peer update for Org1
+export FABRIC_CFG_PATH=${PWD}/../config
+export CORE_PEER_LOCALMSPID="Org1MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+export CORE_PEER_ADDRESS=localhost:7051
+
+peer channel update -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com \
+  -c bluechannel -f ./channel-artifacts/Org1MSPanchors_bluechannel.tx \
+  --tls --cafile "$ORDERER_CA"
+
+# Apply anchor peer update for Org2
+export CORE_PEER_LOCALMSPID="Org2MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+export CORE_PEER_ADDRESS=localhost:9051
+
+peer channel update -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com \
+  -c bluechannel -f ./channel-artifacts/Org2MSPanchors_bluechannel.tx \
+  --tls --cafile "$ORDERER_CA"
+
+# Step 5: Create Red Channel (for Org2 and Org3)
+infoln "Creating Red Channel (redchannel)..."
+
+# Generate the channel transaction
+export FABRIC_CFG_PATH=$PWD/configtx
+export CHANNEL_NAME=redchannel
+
+# Create configtx.yaml specifically for redchannel with Org2 and Org3
+cat > ./configtx/redchannel.yaml << EOF
+---
+Organizations:
+    - &OrdererOrg
+        Name: OrdererOrg
+        ID: OrdererMSP
+        MSPDir: organizations/ordererOrganizations/example.com/msp
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('OrdererMSP.member')"
+            Writers:
+                Type: Signature
+                Rule: "OR('OrdererMSP.member')"
+            Admins:
+                Type: Signature
+                Rule: "OR('OrdererMSP.admin')"
+        OrdererEndpoints:
+            - orderer.example.com:7050
+
+    - &Org2
+        Name: Org2MSP
+        ID: Org2MSP
+        MSPDir: organizations/peerOrganizations/org2.example.com/msp
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('Org2MSP.admin', 'Org2MSP.peer', 'Org2MSP.client')"
+            Writers:
+                Type: Signature
+                Rule: "OR('Org2MSP.admin', 'Org2MSP.client')"
+            Admins:
+                Type: Signature
+                Rule: "OR('Org2MSP.admin')"
+            Endorsement:
+                Type: Signature
+                Rule: "OR('Org2MSP.peer')"
+        AnchorPeers:
+            - Host: peer0.org2.example.com
+              Port: 9051
+
+    - &Org3
+        Name: Org3MSP
+        ID: Org3MSP
+        MSPDir: organizations/peerOrganizations/org3.example.com/msp
+        Policies:
+            Readers:
+                Type: Signature
+                Rule: "OR('Org3MSP.admin', 'Org3MSP.peer', 'Org3MSP.client')"
+            Writers:
+                Type: Signature
+                Rule: "OR('Org3MSP.admin', 'Org3MSP.client')"
+            Admins:
+                Type: Signature
+                Rule: "OR('Org3MSP.admin')"
+            Endorsement:
+                Type: Signature
+                Rule: "OR('Org3MSP.peer')"
+        AnchorPeers:
+            - Host: peer0.org3.example.com
+              Port: 11051
+
+Capabilities:
+    Channel: &ChannelCapabilities
+        V2_0: true
+    Orderer: &OrdererCapabilities
+        V2_0: true
+    Application: &ApplicationCapabilities
+        V2_0: true
+
+Application: &ApplicationDefaults
+    Organizations:
+    Policies:
+        Readers:
+            Type: ImplicitMeta
+            Rule: "ANY Readers"
+        Writers:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+        Admins:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Admins"
+        LifecycleEndorsement:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Endorsement"
+        Endorsement:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Endorsement"
+    Capabilities:
+        <<: *ApplicationCapabilities
+
+Orderer: &OrdererDefaults
+    OrdererType: etcdraft
+    Addresses:
+        - orderer.example.com:7050
+    BatchTimeout: 2s
+    BatchSize:
+        MaxMessageCount: 10
+        AbsoluteMaxBytes: 99 MB
+        PreferredMaxBytes: 512 KB
+    EtcdRaft:
+        Consenters:
+            - Host: orderer.example.com
+              Port: 7050
+              ClientTLSCert: organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/server.crt
+              ServerTLSCert: organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/server.crt
+    Organizations:
+    Policies:
+        Readers:
+            Type: ImplicitMeta
+            Rule: "ANY Readers"
+        Writers:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+        Admins:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Admins"
+        BlockValidation:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+    Capabilities:
+        <<: *OrdererCapabilities
+
+Channel: &ChannelDefaults
+    Policies:
+        Readers:
+            Type: ImplicitMeta
+            Rule: "ANY Readers"
+        Writers:
+            Type: ImplicitMeta
+            Rule: "ANY Writers"
+        Admins:
+            Type: ImplicitMeta
+            Rule: "MAJORITY Admins"
+    Capabilities:
+        <<: *ChannelCapabilities
+
+Profiles:
+    RedChannel:
+        <<: *ChannelDefaults
+        Consortium: SampleConsortium
+        Orderer:
+            <<: *OrdererDefaults
+            Organizations:
+                - *OrdererOrg
+            Capabilities:
+                <<: *OrdererCapabilities
+        Application:
+            <<: *ApplicationDefaults
+            Organizations:
+                - *Org2
+                - *Org3
+            Capabilities:
+                <<: *ApplicationCapabilities
+EOF
+
+# Create the channel transaction for redchannel
+../bin/configtxgen -profile RedChannel -configPath ./configtx -outputCreateChannelTx ./channel-artifacts/redchannel.tx -channelID redchannel
+
+# Set environment variables for the peer commands
+export FABRIC_CFG_PATH=$PWD/../config
+
+# Set Org2 as the channel creator
+export CORE_PEER_LOCALMSPID="Org2MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+export CORE_PEER_ADDRESS=localhost:9051
+
+# Create the channel
+infoln "Creating redchannel..."
+peer channel create -o localhost:7050 -c redchannel \
+  --ordererTLSHostnameOverride orderer.example.com \
+  -f ./channel-artifacts/redchannel.tx --outputBlock ./channel-artifacts/redchannel.block \
+  --tls --cafile "$ORDERER_CA"
+
+# Join Org2 peer to the channel
+infoln "Joining Org2 peer to redchannel..."
+peer channel join -b ./channel-artifacts/redchannel.block
+
+# Join Org3 peer to the channel
+export CORE_PEER_LOCALMSPID="Org3MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org3.example.com/peers/peer0.org3.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org3.example.com/users/Admin@org3.example.com/msp
+export CORE_PEER_ADDRESS=localhost:11051
+
+infoln "Joining Org3 peer to redchannel..."
+peer channel join -b ./channel-artifacts/redchannel.block
+
+# Set anchor peers for redchannel
+infoln "Updating anchor peers for redchannel..."
+# Generate anchor peer update for Org2
+export FABRIC_CFG_PATH=${PWD}/configtx
+../bin/configtxgen -profile RedChannel -configPath ./configtx -outputAnchorPeersUpdate ./channel-artifacts/Org2MSPanchors_redchannel.tx -channelID redchannel -asOrg Org2MSP
+
+# Generate anchor peer update for Org3
+../bin/configtxgen -profile RedChannel -configPath ./configtx -outputAnchorPeersUpdate ./channel-artifacts/Org3MSPanchors_redchannel.tx -channelID redchannel -asOrg Org3MSP
+
+# Apply anchor peer update for Org2
+export FABRIC_CFG_PATH=${PWD}/../config
+export CORE_PEER_LOCALMSPID="Org2MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+export CORE_PEER_ADDRESS=localhost:9051
+
+peer channel update -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com \
+  -c redchannel -f ./channel-artifacts/Org2MSPanchors_redchannel.tx \
+  --tls --cafile "$ORDERER_CA"
+
+# Apply anchor peer update for Org3
+export CORE_PEER_LOCALMSPID="Org3MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org3.example.com/peers/peer0.org3.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org3.example.com/users/Admin@org3.example.com/msp
+export CORE_PEER_ADDRESS=localhost:11051
+
+peer channel update -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com \
+  -c redchannel -f ./channel-artifacts/Org3MSPanchors_redchannel.tx \
+  --tls --cafile "$ORDERER_CA"
+
+# Step 6: Verify channel membership for all organizations
+infoln "Verifying channel membership for all organizations..."
+
+# Check Org1's channels
+export CORE_PEER_LOCALMSPID="Org1MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
+export CORE_PEER_ADDRESS=localhost:7051
+
+infoln "Org1's channels:"
+peer channel list
+
+# Check Org2's channels
+export CORE_PEER_LOCALMSPID="Org2MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org2.example.com/users/Admin@org2.example.com/msp
+export CORE_PEER_ADDRESS=localhost:9051
+
+infoln "Org2's channels:"
+peer channel list
+
+# Check Org3's channels
+export CORE_PEER_LOCALMSPID="Org3MSP"
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/org3.example.com/peers/peer0.org3.example.com/tls/ca.crt
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/org3.example.com/users/Admin@org3.example.com/msp
+export CORE_PEER_ADDRESS=localhost:11051
+
+infoln "Org3's channels:"
+peer channel list
+
+successln "Multi-channel network setup complete!"
