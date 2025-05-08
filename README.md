@@ -65,68 +65,9 @@ Additional samples demonstrate various Fabric use cases and application patterns
 | [Dutch Auction](auction-dutch) | Run an auction in which multiple items of the same type can be sold to more than one buyer. This example also includes the ability to add an auditor organization. | [README](auction-dutch/README.md) |
 
 
-# 🧱 Hyperledger Fabric Multi-Channel Network
+## License <a name="license"></a>
 
-[![Hyperledger Fabric](https://img.shields.io/badge/Hyperledger%20Fabric-2.5.0-blue)](https://hyperledger-fabric.readthedocs.io/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-green)](./LICENSE)
-
-This project sets up a **multi-channel Hyperledger Fabric v2.5.0 network** with **three organizations** and **three channels**, demonstrating **data isolation**, **selective membership**, and **privacy-preserving chaincode deployments**.
-
----
-
-## 📐 Network Topology
-
-### Organizations
-- **Org1**
-- **Org2**
-- **Org3**
-
-### Channels
-- `mychannel` → Org1 + Org2  
-- `bluechannel` → Org1 + Org2  
-- `redchannel` → Org2 + Org3  
-
-### Chaincode Deployments
-- `basic` → `mychannel`
-- `basic-blue` → `bluechannel`
-- `basic-red` → `redchannel`
-
-### Architecture Diagram
-┌─────────────────────────────────────────────────────────────────────┐ │ Hyperledger Fabric Network │ ├────────────┬────────────────────────────┬───────────────────────────┤ │ │ │ │ │ ▼ ▼ ▼ │ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐ │ │ Org1 │ │ Org2 │ │ Org3 │ │ └─────┬───────────┘ └────────┬────────┘ └────────┬────────┘ │ │ │ │ │ ▼ ▼ ▼ │ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ │ │ peer0.org1 │ │ peer0.org2 │ │ peer0.org3 │ │ └─────────────┘ └─────────────┘ └─────────────┘ │ │ │ │ │ ├──────────────────┐ │ │ │ │ mychannel │◄──────────┘ │ │ └──────────────────┘ │ │ ├──────────────────┐ │ │ │ bluechannel │◄──────────┐ │ │ └──────────────────┘ │ │ │ ┌───────────┴──────────┐ │ │ │ redchannel │◄──────────────┘ │ └──────────────────────┘ └─────────────────────────────────────────────────────────────────────┘
-
----
-
-## 🧰 Prerequisites
-
-- [Docker](https://www.docker.com/) and Docker Compose
-- [Go](https://go.dev/dl/) (v1.17 or higher)
-- [Node.js](https://nodejs.org/en/) (v14 or higher)
-- Hyperledger Fabric binaries and samples (v2.5.0)
-
----
-
-## ⚙️ Setup Scripts (Run in Order)
-
-```bash
-# 1. Setup Base Network and Channels
-./minimal-multi-channel.sh
-
-# 2. Deploy Chaincodes to All Channels
-./deploy-all-channel-chaincodes.sh
-
-# 3. Initialize Ledgers with Sample Data
-./initialize-all-ledgers.sh
-
-# 4. Query and Inspect Channel Data
-./query-all-channels.sh
-
-# 5. Verify Channel Membership and Chaincodes
-./verify-full-network.sh
-
-# 6. Test Asset Isolation Across Channels
-./test-transactions.sh
-
-# 7. Demo the Full Network Stack
-./demo-network.sh
-
-```bash
+Hyperledger Project source code files are made available under the Apache
+License, Version 2.0 (Apache-2.0), located in the [LICENSE](LICENSE) file.
+Hyperledger Project documentation files are made available under the Creative
+Commons Attribution 4.0 International License (CC-BY-4.0), available at http://creativecommons.org/licenses/by/4.0/.

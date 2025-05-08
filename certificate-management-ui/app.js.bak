@@ -1,0 +1,476 @@
+const express = require('express');
+const cors = require('cors');
+const { Gateway, Wallets } = require('fabric-network');
+const path = require('path');
+const fs = require('fs');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Organizations configuration
+const organizations = {
+  university: {
+    name: 'UniversityOrg',
+    mspId: 'Org1MSP',
+    connectionProfilePath: path.resolve(__dirname, '..', 'test-network', 'organizations', 'peerOrganizations', 'org1.example.com', 'connection-org1.json'),
+    walletPath: path.join(__dirname, 'wallet', 'org1'),
+    identity: 'admin'
+  },
+  student: {
+    name: 'StudentOrg',
+    mspId: 'Org2MSP',
+    connectionProfilePath: path.resolve(__dirname, '..', 'test-network', 'organizations', 'peerOrganizations', 'org2.example.com', 'connection-org2.json'),
+    walletPath: path.join(__dirname, 'wallet', 'org2'),
+    identity: 'admin'
+  },
+  verifier: {
+    name: 'VerifierOrg',
+    mspId: 'Org3MSP',
+    connectionProfilePath: path.resolve(__dirname, '..', 'test-network', 'organizations', 'peerOrganizations', 'org3.example.com', 'connection-org3.json'),
+    walletPath: path.join(__dirname, 'wallet', 'org3'),
+    identity: 'admin'
+  }
+};
+
+// Simple authentication middleware (in a real app, use a proper authentication system)
+const authenticateOrg = (orgKey) => (req, res, next) => {
+  // In a real app, validate credentials against a database or other service
+  const apiKey = req.headers['x-api-key'];
+
+  // Simple API key validation (for demo purposes only)
+  // In production, use proper authentication with JWT or sessions
+  const validApiKeys = {
+    university: 'university-api-key-123',
+    student: 'student-api-key-456',
+    verifier: 'verifier-api-key-789'
+  };
+
+  if (apiKey && apiKey === validApiKeys[orgKey]) {
+    req.organization = organizations[orgKey];
+    next();
+  } else {
+    res.status(401).json({ error: 'Unauthorized: Invalid API key' });
+  }
+};
+
+// Helper function to connect to the network with organization credentials
+async function connectToNetwork(orgConfig) {
+  // Load connection profile
+  let connectionProfile;
+  try {
+    // Check if connection profile exists first
+    if (!fs.existsSync(orgConfig.connectionProfilePath)) {
+      throw new Error(`Connection profile not found at ${orgConfig.connectionProfilePath}`);
+    }
+
+    const connectionProfileJson = fs.readFileSync(orgConfig.connectionProfilePath, 'utf8');
+    connectionProfile = JSON.parse(connectionProfileJson);
+  } catch (error) {
+    throw new Error(`Error loading connection profile: ${error.message}`);
+  }
+
+  // Create a wallet instance for the organization
+  const wallet = await Wallets.newFileSystemWallet(orgConfig.walletPath);
+
+  // Check if the admin identity exists
+  const identity = await wallet.get(orgConfig.identity);
+  if (!identity) {
+    throw new Error(`Identity ${orgConfig.identity} not found in wallet for ${orgConfig.name}`);
+  }
+
+  // Connect to the gateway
+  const gateway = new Gateway();
+  try {
+    await gateway.connect(connectionProfile, {
+      wallet,
+      identity: orgConfig.identity,
+      discovery: { enabled: false }
+    });
+
+    // Get the network and contract
+    const network = await gateway.getNetwork('certchannel');
+
+    // Log network information to help with debugging
+    console.log(`Successfully connected to channel: certchannel`);
+
+    try {
+      const contract = network.getContract('cert_cc');
+      console.log(`Successfully got contract: cert_cc`);
+      return { gateway, contract };
+    } catch (contractError) {
+      console.error(`Failed to get contract: ${contractError}`);
+      throw contractError;
+    }
+  } catch (gatewayError) {
+    console.error(`Failed to connect to gateway: ${gatewayError}`);
+    if (gatewayError.cause) {
+      console.error(`Caused by: ${gatewayError.cause}`);
+    }
+    throw gatewayError;
+  }
+}
+
+// ===== UNIVERSITY ENDPOINTS =====
+// Endpoint to get all certificates - University
+app.get('/api/university/certificates', authenticateOrg('university'), async (req, res) => {
+  try {
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    const result = await contract.evaluateTransaction('GetAllCertificates');
+
+    // Handle empty responses
+    if (!result || result.length === 0) {
+      res.json([]);  // Return empty array if no certificates
+      gateway.disconnect();
+      return;
+    }
+
+    try {
+      const certificates = JSON.parse(result.toString());
+      res.json(certificates);
+    } catch (parseError) {
+      console.error(`Error parsing certificates result: ${parseError}`);
+      res.json([]);  // Return empty array if parsing fails
+    }
+
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error getting certificates as University: ${error}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint to get a specific certificate - University
+app.get('/api/university/certificates/:id', authenticateOrg('university'), async (req, res) => {
+  try {
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    const result = await contract.evaluateTransaction('GetCertificate', req.params.id);
+
+    if (!result || result.length === 0) {
+      res.status(404).json({ error: 'Certificate not found' });
+      gateway.disconnect();
+      return;
+    }
+
+    try {
+      const certificate = JSON.parse(result.toString());
+      res.json(certificate);
+    } catch (parseError) {
+      console.error(`Error parsing certificate result: ${parseError}`);
+      res.status(500).json({ error: 'Failed to parse certificate data' });
+    }
+
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error getting certificate as University: ${error}`);
+
+    // Special case for not found errors
+    if (error.message && error.message.includes('does not exist')) {
+      res.status(404).json({ error: 'Certificate not found' });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// Endpoint to verify a certificate - University
+app.get('/api/university/certificates/verify/:id', authenticateOrg('university'), async (req, res) => {
+  try {
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    const result = await contract.evaluateTransaction('VerifyCertificate', req.params.id);
+    const valid = result.toString() === 'true';
+    res.json({ valid });
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error verifying certificate as University: ${error}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint to issue a certificate - University only
+app.post('/api/university/certificates', authenticateOrg('university'), async (req, res) => {
+  try {
+    const { studentID, certID, certHash, issuer } = req.body;
+    const { contract, gateway } = await connectToNetwork(req.organization);
+
+    await contract.submitTransaction('IssueCertificate', studentID, certID, certHash, issuer);
+
+    res.status(201).json({
+      success: true,
+      message: 'Certificate issued successfully'
+    });
+
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error issuing certificate as University: ${error}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint to revoke a certificate - University only
+app.delete('/api/university/certificates/:id', authenticateOrg('university'), async (req, res) => {
+  try {
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    await contract.submitTransaction('RevokeCertificate', req.params.id);
+
+    res.json({
+      success: true,
+      message: 'Certificate revoked successfully'
+    });
+
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error revoking certificate as University: ${error}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== STUDENT ENDPOINTS =====
+// Endpoint to get all certificates - Student
+app.get('/api/student/certificates', authenticateOrg('student'), async (req, res) => {
+  try {
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    const result = await contract.evaluateTransaction('GetAllCertificates');
+
+    // Handle empty responses
+    if (!result || result.length === 0) {
+      res.json([]);  // Return empty array if no certificates
+      gateway.disconnect();
+      return;
+    }
+
+    try {
+      const certificates = JSON.parse(result.toString());
+      res.json(certificates);
+    } catch (parseError) {
+      console.error(`Error parsing certificates result: ${parseError}`);
+      res.json([]);  // Return empty array if parsing fails
+    }
+
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error getting certificates as Student: ${error}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint to get a specific certificate - Student
+app.get('/api/student/certificates/:id', authenticateOrg('student'), async (req, res) => {
+  try {
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    const result = await contract.evaluateTransaction('GetCertificate', req.params.id);
+
+    if (!result || result.length === 0) {
+      res.status(404).json({ error: 'Certificate not found' });
+      gateway.disconnect();
+      return;
+    }
+
+    try {
+      const certificate = JSON.parse(result.toString());
+      res.json(certificate);
+    } catch (parseError) {
+      console.error(`Error parsing certificate result: ${parseError}`);
+      res.status(500).json({ error: 'Failed to parse certificate data' });
+    }
+
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error getting certificate as Student: ${error}`);
+
+    // Special case for not found errors
+    if (error.message && error.message.includes('does not exist')) {
+      res.status(404).json({ error: 'Certificate not found' });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// Endpoint to verify a certificate - Student
+app.get('/api/student/certificates/verify/:id', authenticateOrg('student'), async (req, res) => {
+  try {
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    const result = await contract.evaluateTransaction('VerifyCertificate', req.params.id);
+    const valid = result.toString() === 'true';
+    res.json({ valid });
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error verifying certificate as Student: ${error}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== VERIFIER ENDPOINTS =====
+// Endpoint to get all certificates - Verifier
+app.get('/api/verifier/certificates', authenticateOrg('verifier'), async (req, res) => {
+  try {
+    // Check if connection profile exists before attempting connection
+    if (!fs.existsSync(req.organization.connectionProfilePath)) {
+      console.error(`Verifier connection profile not found at ${req.organization.connectionProfilePath}`);
+      return res.status(503).json({
+        error: 'Verifier organization is not available',
+        message: 'The Verifier organization (Org3) has not been added to the network. Please run the addOrg3.sh script first.',
+        details: `Missing connection profile: ${req.organization.connectionProfilePath}`,
+        setup_instructions: 'To add Org3 to your network, run: cd ../test-network/addOrg3 && ./addOrg3.sh up'
+      });
+    }
+
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    const result = await contract.evaluateTransaction('GetAllCertificates');
+
+    // Handle empty responses
+    if (!result || result.length === 0) {
+      res.json([]);  // Return empty array if no certificates
+      gateway.disconnect();
+      return;
+    }
+
+    try {
+      const certificates = JSON.parse(result.toString());
+      res.json(certificates);
+    } catch (parseError) {
+      console.error(`Error parsing certificates result: ${parseError}`);
+      res.json([]);  // Return empty array if parsing fails
+    }
+
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error getting certificates as Verifier: ${error}`);
+
+    // Check the specific error type and provide appropriate response
+    if (error.message && error.message.includes('Connection profile not found')) {
+      res.status(503).json({
+        error: 'Verifier organization is not available',
+        message: 'The Verifier organization (Org3) has not been added to the network. Please run the addOrg3.sh script first.',
+        setup_instructions: 'To add Org3 to your network, run: cd ../test-network/addOrg3 && ./addOrg3.sh up'
+      });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// Endpoint to get a specific certificate - Verifier
+app.get('/api/verifier/certificates/:id', authenticateOrg('verifier'), async (req, res) => {
+  try {
+    // Check if connection profile exists before attempting connection
+    if (!fs.existsSync(req.organization.connectionProfilePath)) {
+      console.error(`Verifier connection profile not found at ${req.organization.connectionProfilePath}`);
+      return res.status(503).json({
+        error: 'Verifier organization is not available',
+        message: 'The Verifier organization (Org3) has not been added to the network. Please run the addOrg3.sh script first.',
+        setup_instructions: 'To add Org3 to your network, run: cd ../test-network/addOrg3 && ./addOrg3.sh up'
+      });
+    }
+
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    const result = await contract.evaluateTransaction('GetCertificate', req.params.id);
+
+    if (!result || result.length === 0) {
+      res.status(404).json({ error: 'Certificate not found' });
+      gateway.disconnect();
+      return;
+    }
+
+    try {
+      const certificate = JSON.parse(result.toString());
+      res.json(certificate);
+    } catch (parseError) {
+      console.error(`Error parsing certificate result: ${parseError}`);
+      res.status(500).json({ error: 'Failed to parse certificate data' });
+    }
+
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error getting certificate as Verifier: ${error}`);
+
+    // Check the specific error type and provide appropriate response
+    if (error.message && error.message.includes('Connection profile not found')) {
+      res.status(503).json({
+        error: 'Verifier organization is not available',
+        message: 'The Verifier organization (Org3) has not been added to the network. Please run the addOrg3.sh script first.',
+        setup_instructions: 'To add Org3 to your network, run: cd ../test-network/addOrg3 && ./addOrg3.sh up'
+      });
+    } else if (error.message && error.message.includes('does not exist')) {
+      res.status(404).json({ error: 'Certificate not found' });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// Endpoint to verify a certificate - Verifier
+app.get('/api/verifier/certificates/verify/:id', authenticateOrg('verifier'), async (req, res) => {
+  try {
+    // Check if connection profile exists before attempting connection
+    if (!fs.existsSync(req.organization.connectionProfilePath)) {
+      console.error(`Verifier connection profile not found at ${req.organization.connectionProfilePath}`);
+      return res.status(503).json({
+        error: 'Verifier organization is not available',
+        message: 'The Verifier organization (Org3) has not been added to the network. Please run the addOrg3.sh script first.',
+        setup_instructions: 'To add Org3 to your network, run: cd ../test-network/addOrg3 && ./addOrg3.sh up'
+      });
+    }
+
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    const result = await contract.evaluateTransaction('VerifyCertificate', req.params.id);
+    const valid = result.toString() === 'true';
+    res.json({ valid });
+    gateway.disconnect();
+  } catch (error) {
+    console.error(`Error verifying certificate as Verifier: ${error}`);
+
+    // Check the specific error type and provide appropriate response
+    if (error.message && error.message.includes('Connection profile not found')) {
+      res.status(503).json({
+        error: 'Verifier organization is not available',
+        message: 'The Verifier organization (Org3) has not been added to the network. Please run the addOrg3.sh script first.',
+        setup_instructions: 'To add Org3 to your network, run: cd ../test-network/addOrg3 && ./addOrg3.sh up'
+      });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// API endpoint to get organization info for UI initialization
+app.get('/api/org-info', (req, res) => {
+  // This endpoint provides information about available organizations 
+  // and their capabilities to the UI
+  const orgInfo = {
+    university: {
+      name: organizations.university.name,
+      capabilities: {
+        canIssue: true,
+        canRevoke: true,
+        canVerify: true
+      }
+    },
+    student: {
+      name: organizations.student.name,
+      capabilities: {
+        canIssue: false,
+        canRevoke: false,
+        canVerify: true
+      }
+    },
+    verifier: {
+      name: organizations.verifier.name,
+      capabilities: {
+        canIssue: false,
+        canRevoke: false,
+        canVerify: true
+      }
+    }
+  };
+
+  res.json(orgInfo);
+});
+
+const PORT = 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Organization-specific API endpoints are available at /api/{university|student|verifier}/certificates`);
+});

@@ -1,0 +1,208 @@
+const express = require('express');
+const cors = require('cors');
+const { Gateway, Wallets } = require('fabric-network');
+const path = require('path');
+const fs = require('fs');
+const { executePeerQuery } = require('./cli-helper');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Organizations configuration
+const organizations = {
+  university: {
+    name: 'UniversityOrg',
+    mspId: 'Org1MSP',
+    connectionProfilePath: path.resolve(__dirname, '..', 'test-network', 'organizations', 'peerOrganizations', 'org1.example.com', 'connection-org1.json'),
+    walletPath: path.join(__dirname, 'wallet', 'org1'),
+    identity: 'admin'
+  },
+  student: {
+    name: 'StudentOrg',
+    mspId: 'Org2MSP',
+    connectionProfilePath: path.resolve(__dirname, '..', 'test-network', 'organizations', 'peerOrganizations', 'org2.example.com', 'connection-org2.json'),
+    walletPath: path.join(__dirname, 'wallet', 'org2'),
+    identity: 'admin'
+  },
+  verifier: {
+    name: 'VerifierOrg',
+    mspId: 'Org3MSP',
+    connectionProfilePath: path.resolve(__dirname, '..', 'test-network', 'organizations', 'peerOrganizations', 'org3.example.com', 'connection-org3.json'),
+    walletPath: path.join(__dirname, 'wallet', 'org3'),
+    identity: 'admin'
+  }
+};
+
+// Simple authentication middleware (in a real app, use a proper authentication system)
+const authenticateOrg = (orgKey) => (req, res, next) => {
+  // In a real app, validate credentials against a database or other service
+  const apiKey = req.headers['x-api-key'];
+
+  // Simple API key validation (for demo purposes only)
+  // In production, use proper authentication with JWT or sessions
+  const validApiKeys = {
+    university: 'university-api-key-123',
+    student: 'student-api-key-456',
+    verifier: 'verifier-api-key-789'
+  };
+
+  if (apiKey && apiKey === validApiKeys[orgKey]) {
+    req.organization = organizations[orgKey];
+    next();
+  } else {
+    res.status(401).json({ error: 'Unauthorized: Invalid API key' });
+  }
+};
+
+// Helper function to connect to the network with organization credentials
+async function connectToNetwork(orgConfig) {
+  // Load connection profile
+  let connectionProfile;
+  try {
+    // Check if connection profile exists first
+    if (!fs.existsSync(orgConfig.connectionProfilePath)) {
+      throw new Error(`Connection profile not found at ${orgConfig.connectionProfilePath}`);
+    }
+    
+    const connectionProfileJson = fs.readFileSync(orgConfig.connectionProfilePath, 'utf8');
+    connectionProfile = JSON.parse(connectionProfileJson);
+  } catch (error) {
+    throw new Error(`Error loading connection profile: ${error.message}`);
+  }
+
+  // Create a wallet instance for the organization
+  const wallet = await Wallets.newFileSystemWallet(orgConfig.walletPath);
+
+  // Check if the admin identity exists
+  const identity = await wallet.get(orgConfig.identity);
+  if (!identity) {
+    throw new Error(`Identity ${orgConfig.identity} not found in wallet for ${orgConfig.name}`);
+  }
+
+  // Connect to the gateway with discovery disabled
+  const gateway = new Gateway();
+  try {
+    await gateway.connect(connectionProfile, {
+      wallet,
+      identity: orgConfig.identity,
+      discovery: { enabled: false }
+    });
+
+    // Get the network and contract
+    const network = await gateway.getNetwork('certchannel');
+    console.log(`Successfully connected to channel: certchannel`);
+    
+    try {
+      const contract = network.getContract('cert_cc');
+      console.log(`Successfully got contract: cert_cc`);
+      return { gateway, contract };
+    } catch (contractError) {
+      console.error(`Failed to get contract: ${contractError}`);
+      throw contractError;
+    }
+  } catch (gatewayError) {
+    console.error(`Failed to connect to gateway: ${gatewayError}`);
+    throw gatewayError;
+  }
+}
+
+// ===== UNIVERSITY ENDPOINTS =====
+// Endpoint to get all certificates - University
+app.get('/api/university/certificates', authenticateOrg('university'), async (req, res) => {
+  try {
+    console.log("Getting all certificates as University...");
+    const { contract, gateway } = await connectToNetwork(req.organization);
+    
+    try {
+      // Try using the SDK first
+      console.log("Attempting to get certificates with SDK...");
+      const result = await contract.evaluateTransaction('GetAllCertificates');
+      
+      console.log(`SDK Result: ${result ? result.toString() : "null or empty"}`);
+      
+      // Handle empty responses
+      if (!result || result.length === 0) {
+        console.log("No certificates found in the ledger via SDK");
+        
+        // Try CLI fallback immediately if SDK returns empty
+        try {
+          console.log("Falling back to CLI approach for GetAllCertificates...");
+          const cliResult = await executePeerQuery('GetAllCertificates', []);
+          
+          if (cliResult && cliResult.length > 0) {
+            try {
+              const certificates = JSON.parse(cliResult);
+              console.log("CLI approach returned data successfully");
+              res.json(certificates);
+            } catch (parseError) {
+              console.error(`Error parsing CLI certificates result: ${parseError}`);
+              res.json([]);
+            }
+          } else {
+            console.log("CLI approach also returned no certificates");
+            res.json([]);
+          }
+        } catch (cliError) {
+          console.error(`CLI fallback failed: ${cliError}`);
+          res.json([]);
+        }
+        
+        gateway.disconnect();
+        return;
+      }
+      
+      try {
+        const certificates = JSON.parse(result.toString());
+        res.json(certificates);
+      } catch (parseError) {
+        console.error(`Error parsing certificates result: ${parseError}`);
+        res.json([]);
+      }
+      
+      gateway.disconnect();
+    } catch (sdkError) {
+      console.error(`SDK query failed: ${sdkError}`);
+      console.log("Falling back to CLI for GetAllCertificates...");
+      
+      try {
+        // Fall back to CLI approach
+        const cliResult = await executePeerQuery('GetAllCertificates', []);
+        
+        // Handle empty responses
+        if (!cliResult || cliResult.length === 0) {
+          console.log("CLI approach returned no certificates");
+          res.json([]);
+          gateway.disconnect();
+          return;
+        }
+        
+        try {
+          const certificates = JSON.parse(cliResult);
+          console.log("CLI approach returned data successfully");
+          res.json(certificates);
+        } catch (parseError) {
+          console.error(`Error parsing CLI certificates result: ${parseError}`);
+          res.json([]);
+        }
+      } catch (cliError) {
+        console.error(`CLI fallback failed: ${cliError}`);
+        res.json([]);
+      } finally {
+        gateway.disconnect();
+      }
+    }
+  } catch (error) {
+    console.error(`Error getting certificates as University: ${error}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rest of your endpoints remain the same...
+
+const PORT = 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Organization-specific API endpoints are available at /api/{university|student|verifier}/certificates`);
+});

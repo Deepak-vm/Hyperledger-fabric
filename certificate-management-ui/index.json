@@ -1,0 +1,8 @@
+{
+  "index": {
+    "fields": ["docType", "issuer", "recipient"]
+  },
+  "ddoc": "indexCertificateDoc",
+  "name": "indexCertificate",
+  "type": "json"
+}
